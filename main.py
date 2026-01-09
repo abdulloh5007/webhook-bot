@@ -1,15 +1,22 @@
 import logging
-import time
+import os
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Request
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.request import HTTPXRequest
 
 # =========================
-# НАСТРОЙКИ
+# НАСТРОЙКИ ИЗ .ENV
 # =========================
-BOT_TOKEN = "6410092302:AAFp1lFVxUOU2GU5VJNviYY2nAHDWnGcyfA"  # СРОЧНО СМЕНИ НА НОВЫЙ!
-WEBHOOK_URL = "https://webhook-bot-na0z.onrender.com/webhook"  # Обязательно HTTPS
+from dotenv import load_dotenv
+load_dotenv()  # Загружаем .env файл
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://your-bot.onrender.com/webhook")  # fallback на случай
+
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN не найден в .env файле!")
 
 # =========================
 # ВРЕМЯ ЗАПУСКА
@@ -17,7 +24,7 @@ WEBHOOK_URL = "https://webhook-bot-na0z.onrender.com/webhook"  # Обязате�
 START_TIME = datetime.now()
 
 # =========================
-# ЛОГИ (ТОЛЬКО user_id)
+# ЛОГИ
 # =========================
 logging.basicConfig(
     filename="bot.log",
@@ -26,9 +33,15 @@ logging.basicConfig(
 )
 
 # =========================
-# TELEGRAM APP
+# TELEGRAM APP С РЕАЛЬНЫМ ПИНГОМ
 # =========================
-telegram_app = Application.builder().token(BOT_TOKEN).build()
+# Создаём кастомный request с таймаутом, чтоб мерить реальный пинг
+request = HTTPXRequest(connect_timeout=30.0, read_timeout=30.0)
+
+telegram_app = Application.builder() \
+    .token(BOT_TOKEN) \
+    .request(request) \
+    .build()
 
 # =========================
 # FASTAPI
@@ -47,17 +60,31 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # =========================
-# /status
+# /status С РЕАЛЬНЫМ ПИНГОМ ДО TELEGRAM
 # =========================
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Реальный пинг — делаем запрос к Telegram API (getMe — самый лёгкий)
     t1 = time.perf_counter()
+    try:
+        bot_info = await telegram_app.bot.get_me()
+        success = True
+    except Exception:
+        success = False
+    
+    t2 = time.perf_counter()
+    real_ping_ms = round((t2 - t1) * 1000, 2)
+
     uptime = datetime.now() - START_TIME
     uptime_str = str(timedelta(seconds=int(uptime.total_seconds())))
-    t2 = time.perf_counter()
-    ping_ms = round((t2 - t1) * 1000, 2)
+
+    if success:
+        ping_text = f"⚡ Реальный пинг: {real_ping_ms} ms"
+    else:
+        ping_text = "⚡ Реальный пинг: ошибка соединения"
+
     await update.message.reply_text(
         "🟢 Статус: ONLINE\n"
-        f"⚡ Ping: {ping_ms} ms\n"
+        f"{ping_text}\n"
         f"🕒 Запущен: {START_TIME.strftime('%Y-%m-%d %H:%M:%S')}\n"
         f"⏱ Uptime: {uptime_str}"
     )
@@ -76,12 +103,13 @@ async def telegram_webhook(request: Request):
     return {"ok": True}
 
 # =========================
-# STARTUP
+# STARTUP / SHUTDOWN
 # =========================
 @app.on_event("startup")
 async def on_startup():
     await telegram_app.initialize()
     await telegram_app.bot.set_webhook(WEBHOOK_URL)
+    print(f"Webhook установлен: {WEBHOOK_URL}")
 
 @app.on_event("shutdown")
 async def on_shutdown():
